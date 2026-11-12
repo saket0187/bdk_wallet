@@ -436,7 +436,7 @@ pub enum ReplaceByFeeError {
     CreatePsbt(CreatePsbtError),
     /// Failed to compute the fee of an original transaction
     PreviousFee(bdk_chain::tx_graph::CalculateFeeError),
-    /// Original transaction could not be found
+    /// Original transaction could not be found or is not canonical
     MissingTransaction(Txid),
     /// One of the transactions to be replaced is already confirmed
     TransactionConfirmed(Txid),

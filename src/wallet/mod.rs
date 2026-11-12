@@ -3438,7 +3438,9 @@ impl Wallet {
     /// A [`ReplaceByFeeError`] will be thrown if any of the following occurs
     ///
     /// - An original transaction is already confirmed
-    /// - An original transaction is missing from the wallet
+    /// - An original transaction is missing from the wallet or is not canonical, e.g. it was
+    ///   replaced or evicted. To replace an evicted transaction, mark it as canonical with
+    ///   [`PsbtParams::canonicalization_params`].
     /// - Failure to calculate the [fee](Wallet::calculate_fee) of an original transaction
     /// - Failure to complete coin selection
     /// - Failure to create or update the PSBT.
@@ -3508,7 +3510,7 @@ impl Wallet {
             ..
         } = &params;
 
-        // None of the txids-to-replace may already be confirmed
+        // Every txid-to-replace must be canonical and unconfirmed
         let chain_tip = self.chain.tip().block_id();
         let chain_positions: HashMap<Txid, ChainPosition<_>> = self
             .tx_graph
@@ -3517,10 +3519,10 @@ impl Wallet {
             .map(|canonical_tx| (canonical_tx.tx_node.txid, canonical_tx.chain_position))
             .collect();
         for &txid in txids_to_replace.iter() {
-            if chain_positions
+            let chain_position = chain_positions
                 .get(&txid)
-                .is_some_and(|chain_position| chain_position.is_confirmed())
-            {
+                .ok_or(ReplaceByFeeError::MissingTransaction(txid))?;
+            if chain_position.is_confirmed() {
                 return Err(ReplaceByFeeError::TransactionConfirmed(txid));
             }
         }

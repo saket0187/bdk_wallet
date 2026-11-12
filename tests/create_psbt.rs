@@ -700,6 +700,82 @@ fn test_replace_by_fee_confirmed_tx_error() {
     );
 }
 
+// Test that `replace_by_fee` rejects an original tx that is not canonical
+#[test]
+fn test_replace_by_fee_non_canonical_tx_error() {
+    use KeychainKind::*;
+    use bdk_chain::CanonicalizationParams;
+    use bdk_wallet::error::ReplaceByFeeError;
+
+    let (desc, change_desc) = get_test_wpkh_and_change_desc();
+    let mut wallet = Wallet::create(desc, change_desc)
+        .network(Network::Regtest)
+        .create_wallet_no_persist()
+        .unwrap();
+
+    let block = BlockId {
+        height: 100,
+        hash: Hash::hash(b"100"),
+    };
+    let addr = wallet.reveal_next_address(External).address;
+
+    let funding_tx = Transaction {
+        input: vec![TxIn::default()],
+        output: vec![TxOut {
+            value: Amount::from_sat(200_000),
+            script_pubkey: addr.script_pubkey(),
+        }],
+        ..new_tx(0)
+    };
+    let funding_op = OutPoint::new(funding_tx.compute_txid(), 0);
+    insert_tx_anchor(&mut wallet, funding_tx, block);
+
+    let recip =
+        ScriptBuf::from_hex("5120e8f5c4dc2f5d6a7595e7b108cb063da9c7550312da1e22875d78b9db62b59cd5")
+            .unwrap();
+    let mut params = PsbtParams::default();
+    params
+        .add_utxos(&[funding_op])
+        .add_recipients([(recip.clone(), Amount::from_sat(100_000))]);
+    let original_tx = wallet.create_psbt(params).unwrap().0.unsigned_tx;
+    let original_txid = original_tx.compute_txid();
+    wallet.apply_unconfirmed_txs([(original_tx.clone(), 1)]);
+    wallet.apply_evicted_txs([(original_txid, 2)]);
+
+    let replace = |wallet: &mut Wallet, canonical_params: CanonicalizationParams| {
+        let mut params = PsbtParams::default();
+        params
+            .add_recipients([(recip.clone(), Amount::from_sat(100_000))])
+            .canonicalization_params(canonical_params);
+        wallet.replace_by_fee(params.replace_txs([original_tx.clone()]))
+    };
+    let assert_not_canonical = |result: Result<_, ReplaceByFeeError>| {
+        assert!(
+            matches!(result, Err(ReplaceByFeeError::MissingTransaction(txid)) if txid == original_txid),
+            "expected MissingTransaction error, got: {result:?}",
+        );
+    };
+
+    // Evicted: rejected unless the caller marks it as canonical.
+    assert_not_canonical(replace(&mut wallet, CanonicalizationParams::default()));
+    let assume_original = CanonicalizationParams {
+        assume_canonical: vec![original_txid],
+    };
+    let replacement_tx = replace(&mut wallet, assume_original).unwrap().0.unsigned_tx;
+
+    // Seen again, then replaced, then the replacement confirms.
+    wallet.apply_unconfirmed_txs([(original_tx.clone(), 3)]);
+    assert!(replace(&mut wallet, CanonicalizationParams::default()).is_ok());
+    wallet.apply_unconfirmed_txs([(replacement_tx.clone(), 4)]);
+    assert_not_canonical(replace(&mut wallet, CanonicalizationParams::default()));
+    let confirm_block = BlockId {
+        height: 101,
+        hash: Hash::hash(b"101"),
+    };
+    insert_tx_anchor(&mut wallet, replacement_tx, confirm_block);
+    assert_not_canonical(replace(&mut wallet, CanonicalizationParams::default()));
+}
+
 // Test that `replace_by_fee` errors when all original inputs have been removed via
 // `remove_utxo`, leaving the replacement with no inputs from the replaced transaction.
 #[test]
