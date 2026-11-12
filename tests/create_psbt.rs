@@ -638,6 +638,91 @@ fn test_replace_by_fee_replaces_descendant_fees() {
     );
 }
 
+// Test that `replace_by_fee` doesn't count the fee of a descendant that was itself replaced
+#[test]
+fn test_replace_by_fee_ignores_replaced_descendant_fees() {
+    use KeychainKind::*;
+
+    let (desc, change_desc) = get_test_wpkh_and_change_desc();
+    let mut wallet = Wallet::create(desc, change_desc)
+        .network(Network::Regtest)
+        .create_wallet_no_persist()
+        .unwrap();
+
+    let block_id = BlockId {
+        height: 100,
+        hash: Hash::hash(b"100"),
+    };
+    let addr0 = wallet.reveal_next_address(External).address;
+    let addr1 = wallet.reveal_next_address(Internal).address;
+    let external =
+        ScriptBuf::from_hex("5120e8f5c4dc2f5d6a7595e7b108cb063da9c7550312da1e22875d78b9db62b59cd5")
+            .unwrap();
+
+    let funding_tx = Transaction {
+        input: vec![TxIn::default()],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000_000),
+            script_pubkey: addr0.script_pubkey(),
+        }],
+        ..new_tx(0)
+    };
+    let funding_op = OutPoint::new(funding_tx.compute_txid(), 0);
+    insert_tx_anchor(&mut wallet, funding_tx, block_id);
+
+    let tx_a = Transaction {
+        input: vec![TxIn {
+            previous_output: funding_op,
+            ..TxIn::default()
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: external.clone(),
+            },
+            TxOut {
+                value: Amount::from_sat(900_000),
+                script_pubkey: addr1.script_pubkey(),
+            },
+        ],
+        ..new_tx(0)
+    };
+    let a_txid = tx_a.compute_txid();
+    wallet.apply_unconfirmed_txs([(tx_a.clone(), 1)]);
+
+    // B spends A's change and is then replaced by C, so only A and C are in the mempool.
+    let child = |value: u64| Transaction {
+        input: vec![TxIn {
+            previous_output: OutPoint::new(a_txid, 1),
+            ..TxIn::default()
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: external.clone(),
+        }],
+        ..new_tx(0)
+    };
+    let tx_b = child(880_000);
+    let tx_c = child(870_000);
+    wallet.apply_unconfirmed_txs([(tx_b.clone(), 2)]);
+    wallet.apply_unconfirmed_txs([(tx_c.clone(), 3)]);
+
+    let fee_a = wallet.calculate_fee(&tx_a).unwrap();
+    let fee_b = wallet.calculate_fee(&tx_b).unwrap();
+    let fee_c = wallet.calculate_fee(&tx_c).unwrap();
+
+    let mut params = PsbtParams::default();
+    params.add_recipients([(external, Amount::from_sat(100_000))]);
+    let (psbt, _) = wallet.replace_by_fee(params.replace_txs([tx_a])).unwrap();
+    let replacement_fee = wallet.calculate_fee(&psbt.unsigned_tx).unwrap();
+
+    assert!(replacement_fee >= fee_a + fee_c);
+    assert!(
+        replacement_fee < fee_a + fee_b + fee_c,
+        "replacement fee ({replacement_fee}) must not include the fee of replaced descendant B ({fee_b})",
+    );
+}
+
 // Test that `replace_by_fee`` rejects a confirmed original tx
 #[test]
 fn test_replace_by_fee_confirmed_tx_error() {

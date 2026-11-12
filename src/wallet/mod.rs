@@ -3548,7 +3548,7 @@ impl Wallet {
         // feed into `original_txs` for the RBF fee rate floor.
         //
         // `to_replace` also includes walked descendants so they are excluded from coin
-        // selection; their fees accumulate into `descendant_fee`.
+        // selection; the fees of canonical ones accumulate into `descendant_fee`.
         let direct_conflicts: HashSet<Txid> = txids_to_replace.iter().copied().collect();
 
         let descendants: HashSet<Txid> = direct_conflicts
@@ -3633,11 +3633,12 @@ impl Wallet {
             })
             .collect::<Result<_, _>>()?;
 
-        // Sum fees from all descendants known to the tx graph. This assumes every
+        // Sum fees from the canonical descendants. This assumes every canonical
         // descendant is currently in the mempool, which could slightly overestimate
         // the fee floor if a descendant was evicted or never relayed.
         let descendant_fee: Amount = descendants
             .iter()
+            .filter(|&txid| chain_positions.contains_key(txid))
             .filter_map(|&txid| {
                 let tx = self.tx_graph.graph().get_tx(txid)?;
                 self.calculate_fee(&tx).ok()
